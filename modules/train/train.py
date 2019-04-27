@@ -11,13 +11,18 @@ from modules.models.released_models import released_models
 
 logging.basicConfig(level=logging.INFO)
 
+def parse_f1(result):
+    rows = result.split('\n')
+    mat = list(map(lambda r: r.split('     '), rows))
+    f1 = float(mat[-2][-2])
+    return f1
 
 def train_step(dl, model, optimizer, lr_scheduler=None, clip=None, num_epoch=1):
     model.train()
     epoch_loss = 0
     idx = 0
-    pr = tqdm(dl, total=len(dl), leave=False)
-    for batch in pr:
+    prog = tqdm(dl, total=len(dl), leave=False)
+    for batch in prog:
         idx += 1
         model.zero_grad()
         loss = model.score(batch)
@@ -28,7 +33,7 @@ def train_step(dl, model, optimizer, lr_scheduler=None, clip=None, num_epoch=1):
         optimizer.zero_grad()
         loss = loss.data.cpu().tolist()
         epoch_loss += loss
-        pr.set_description("train loss: {}".format(epoch_loss / idx))
+        prog.set_description("train loss: {}".format(epoch_loss / idx))
         if lr_scheduler is not None:
             lr_scheduler.step()
         # torch.cuda.empty_cache()
@@ -206,7 +211,7 @@ class NerLearner(object):
         model = released_models[name].from_config(**config["model"]["params"])
         return cls(data, model, **config["learner"])
 
-    def fit(self, epochs=100, resume_history=True, target_metric="f1"):
+    def fit(self, epochs=100, resume_history=True, target_metric="f1", pruner=None):
         if not resume_history:
             self.optimizer_defaults["t_total"] = epochs * len(self.data.train_dl)
             self.optimizer = BertAdam(**self.optimizer_defaults)
@@ -219,12 +224,18 @@ class NerLearner(object):
         try:
             for _ in range(epochs):
                 self.epoch += 1
-                self.fit_one_cycle(self.epoch, target_metric)
+                self.fit_one_cycle(self.epoch, target_metric, pruner=pruner)
         except KeyboardInterrupt:
             pass
 
-    def fit_one_cycle(self, epoch, target_metric="f1"):
+    def fit_one_cycle(self, epoch, target_metric="f1", pruner=None):
         train_step(self.data.train_dl, self.model, self.optimizer, self.lr_scheduler, self.clip, epoch)
+        if pruner is not None:
+            if type(pruner) == list:
+                for _pruner in pruner:
+                    _pruner.apply_mask()
+            else:
+                pruner.apply_mask()
         if epoch % self.validate_every == 0:
             if self.data.is_cls:
                 rep, rep_cls = validate_step(self.data.valid_dl, self.model, self.data.id2label, self.sup_labels,
@@ -236,7 +247,7 @@ class NerLearner(object):
         idx, metric = get_mean_max_metric(self.history, target_metric, True)
         if self.verbose:
             logging.info("on epoch {} by max_{}: {}".format(idx, target_metric, metric))
-            print(self.history[-1])
+            print('F1: {}'.format(parse_f1(self.history[-1])))
             if self.data.is_cls:
                 logging.info("on epoch {} classification report:")
                 print(self.cls_history[-1])
